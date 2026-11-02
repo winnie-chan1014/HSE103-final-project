@@ -1,0 +1,237 @@
+---
+title: "Submission2"
+author: "Zhiying(Winnie)Chen"
+date: "2026-11-02"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,fig.width = 7,fig.height = 5)
+library(tidyverse)
+```
+
+### My Choice of Genes
+
+* Genes: GNLY, LYN, IL26
+* Continuous covariate: mat_vitD(vitamin D, ng/mL)
+* Categorical covariate 1: bmi_group
+* Cateforical covariate 2: preg_preeclampsia (Normal vs. Preeclampsia)
+
+**Why these tow new genes?**  I screened the genes that are in the expression file 
+for an association with vitamin D and with preeclampsia, and picked two that behave 
+differently from GNLY.
+* LYN goes up with vitamin D (GNLY goes down) and is expressed at a high level.
+* IL26 is expressed at a very low level, so its y-axis is on a completely 
+different scale.
+
+### Step1. Load the raw data
+
+```{r load}
+#read.csv with row.names = 1 uses the first column (probe IDs) as row names
+covar <- read.csv(file = 'GSE85307_covar-1.csv')
+geneNames <- read.csv(file = 'GSE85307_geneNames.csv')
+expr <- read.csv(file = 'GSE85307_geneExpression.csv', row.names = 1)
+
+# The first column name of the covariate file can come in with a hidden extra
+# character (BOM), so we rename it ourselves
+colnames(covar)[1] <- 'subjectID'
+
+# Look at the the structure
+str(covar)
+dim(expr)
+head(geneNames)
+```
+### Step 2. Clean the covariates
+
+Every covariate value is stored as text with a label, like "age_year: xxx". I
+remove everything up to and including ":" and then fix the data types.
+
+```{r clean}
+# Loop through columns 3 to 10 (all covariates; columns 1-2 are the IDs)
+# '.*: ' means "any characters followed by a colon and a space"
+for(i in colnames(covar)[3:10]){
+  covar[,i] <- sub(pattern = '.*: ',replacement = '', x = covar[,i])
+}
+head(covar)
+
+# Numeric variables
+covar$mat_age_yrs <- as.numeric(covar$mat_age_yrs)
+covar$delivery_gestAge_wks <- as.numeric(covar$delivery_gestAge_wks)
+covar$sampleCollection_gestAge_wks <- as.numeric(covar$sampleCollection_gestAge_wks)
+covar$mat_BMI <- as.numeric(covar$mat_BMI)
+covar$mat_vitD <- as.numeric(covar$mat_vitD)
+
+# Categorical variables
+covar$preg_preeclampsia <- factor(covar$preg_preeclampsia,
+                                  levels = c('Normal','Preeclampsia'))
+covar$mat_asthma <- factor(ifelse(covar$mat_asthma=='1','Asthma','Healthy'))
+
+# Check that the types and values look right
+str(covar)
+summary(covar)
+```
+### Step 3. Derive a categorical variable from a continuous one
+
+```{r derive}
+# BMI groups: <25, 25-30, >=30
+# Only 5 women have the BMI < 18.5, too few for their own group, so they are 
+# combined with the "<25" group
+covar$bmi_group <- cut(covar$mat_BMI,
+                       breaks = c(0,25,30,Inf),
+                       labels = c('<25','25-30','>=30'))
+
+# Check the sample sizes
+table(covar$bmi_group,covar$preg_preeclampsia)
+
+```
+
+### Step 4. Build one data frame with all three genes
+
+```{r match}
+genesOfInterest <- c('GNLY','LYN','IL26')
+
+# Gene name <- probe ID
+probeLookup <- geneNames[geneNames$GENE %in% genesOfInterest,]
+probeLookup$PROBEID <- as.character(probeLookup$PROBEID)
+
+# Make sure there is exactly one probe per gene and all are in the 
+# expression data (all True). Only 500 of the 750 genes in geneNames are in expr.
+nrow(probeLookup)
+table(probeLookup$PROBEID %in% rownames(expr))
+
+# Transpose so smaples are rows
+exprT <- t(expr)
+
+# Startt from the covariates and add one column per gene
+plotData <- covar
+for(i in genesOfInterest){
+  # Find the probe ID for this gene
+  probeID <- probeLookup[probeLookup$GENE==i,'PROBEID']
+  # Pull out the gene's values, ordering the samples by the covariate geoIDs
+  # so that each row of the covariates gets its own sample's expression
+  plotData[,i] <- as.numeric(exprT[plotData$geoID,probeID])
+}
+
+# Check there are no missing values (all F)
+table(is.na(plotData[,genesOfInterest]))
+
+# Spot check one sample for each gene against the raw expression table(all T)
+for(i in genesOfInterest){
+  probeID <- probeLookup[probeLookup$GENE==i,'PROBEID']
+  print(expr[probeID,plotData$geoID[1]]==plotData[1,i])
+}
+
+head(plotData[,c('geoID','mat_vitD','bmi_group','preg_preeclampsia',genesOfInterest)])
+```
+
+### Step 5. The function
+
+
+```{r function}
+plotGeneExpression <- function(data,geneList,contVar,catVars) {
+  
+  # Define color palette
+  colorPalette <- c('grey50','darkgreen')
+  
+  # Define theme 
+  myTheme <- theme_classic(base_size = 14) +
+    theme(legend.position = 'top',
+          plot.title = element_text(size = 14),
+          plot.title.position = 'plot')
+  
+  # Define somewhere to store the plots
+  myPlots <- list()
+  
+  # Loop through all genes
+  for (i in geneList) {
+    
+    # Plot 1: histogram of gene expression
+    # (.data[[i]] turns the gene name, which is text, into the column of that name)
+    p1 <- ggplot(data,aes(x = .data[[i]])) +
+      geom_histogram(bins = 20,fill = 'darkgreen',color = 'white') +
+      labs(title = paste('Distribution of',i,'Expression'),
+           x = paste(i,'Expression'),y = 'Number of Samples') +
+      myTheme
+    
+    # Plot 2: continuous covariate vs. gene expression
+    p2 <- ggplot(data,aes(x = .data[[contVar]],y = .data[[i]])) +
+      geom_point() +
+      # Add linear fit with shaded error
+      geom_smooth(method = lm,formula = y ~ x,color = 'darkgreen',fill = 'darkgreen') +
+      # Leave empty space at the top of the plot for the correlation
+      scale_y_continuous(expand = expansion(mult = c(0.05,0.2))) +
+      # Add the Pearson correlation
+      ggpubr::stat_cor(method = 'pearson') +
+      labs(title = paste(i,'Expression vs.',contVar),
+           x = contVar,y = paste(i,'Expression')) +
+      myTheme
+    
+    # Plot 3: boxplot by both categorical variables
+    p3 <- ggplot(data,aes(x = .data[[catVars[1]]],y = .data[[i]],
+                          fill = .data[[catVars[2]]])) +
+      # outlier.shape = NA because every sample is drawn as a point below
+      geom_boxplot(outlier.shape = NA) +
+      geom_point(position = position_jitterdodge(jitter.width = 0.15)) +
+      scale_fill_manual(values = colorPalette) +
+      labs(title = str_wrap(paste(i,'Expression by',catVars[1],'and',catVars[2]),
+                            width = 45),
+           x = catVars[1],y = paste(i,'Expression'),fill = catVars[2]) +
+      myTheme
+    
+    # Store the 3 plots for this gene
+    myPlots[[i]] <- list('histogram' = p1,'scatter' = p2,'boxplot' = p3)
+  }
+  
+  # Return the list of plots
+  myPlots
+}
+```
+
+
+### Step 6. Run the function
+
+```{r run}
+# One call makes all 9 plots (3 plots x 3 genes)
+genePlots <- plotGeneExpression(data = plotData,
+                                geneList = genesOfInterest,
+                                contVar = 'mat_vitD',
+                                catVars = c('bmi_group','preg_preeclampsia'))
+
+# Look at the structure of what the function returned
+names(genePlots)
+names(genePlots$GNLY)
+
+# Save every plot, e.g. submission2_GNLY_histogram.png
+for (i in names(genePlots)) {
+  for (j in names(genePlots[[i]])) {
+    ggsave(filename = paste0('submission2_',i,'_',j,'.png'),
+           plot = genePlots[[i]][[j]],width = 7,height = 5)
+  }
+}
+```
+
+
+### Plots for GNLY
+
+```{r gnly}
+genePlots$GNLY$histogram
+genePlots$GNLY$scatter
+genePlots$GNLY$boxplot
+```
+
+
+### Plots for LYN
+
+```{r lyn}
+genePlots$LYN$histogram
+genePlots$LYN$scatter
+genePlots$LYN$boxplot
+```
+
+### Plots for IL26
+
+```{r il26}
+genePlots$IL26$histogram
+genePlots$IL26$scatter
+genePlots$IL26$boxplot
+```
