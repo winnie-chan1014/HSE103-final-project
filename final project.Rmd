@@ -1,0 +1,351 @@
+---
+title: "final project"
+author: "Zhiying(Winnie)Chen"
+date: "2026-11-09"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(pheatmap)
+```
+
+### My choices
+
+* Gene: GNLY
+* Continuous covariate: mat_vitD (vitamin D, ng/mL)
+* Categorical covariate 1: mat_BMI (BMI group, derived from a continuous variable)
+* Categorical covariate 2: preg_preeclampsia (Normal vs. Preeclampsia)
+
+### Step 1. Load the raw data
+
+```{r load}
+#read.csv with row.names = 1 uses the first column (probe IDs) as row names
+covar <- read.csv(file = 'GSE85307_covar-1.csv')
+geneNames <- read.csv(file = 'GSE85307_geneNames.csv')
+expr <- read.csv(file = 'GSE85307_geneExpression.csv', row.names = 1)
+
+# The first column name of the covariate file can come in with a hidden extra
+# character (BOM), so we rename it ourselves
+colnames(covar)[1] <- 'subjectID'
+
+# Look at the the structure
+str(covar)
+dim(expr)
+head(geneNames)
+```
+
+
+### Step 2. Clean the covariates
+
+Every covariate value is stored as text with a label, like "age_year: xxx". I
+remove everything up to and including ":" and then fix the data types.
+
+```{r clean}
+# Loop through columns 3 to 10 (all covariates; columns 1-2 are the IDs)
+# '.*: ' means "any characters followed by a colon and a space"
+for(i in colnames(covar)[3:10]){
+  covar[,i] <- sub(pattern = '.*: ',replacement = '', x = covar[,i])
+}
+head(covar)
+
+# Numeric variables
+covar$mat_age_yrs <- as.numeric(covar$mat_age_yrs)
+covar$delivery_gestAge_wks <- as.numeric(covar$delivery_gestAge_wks)
+covar$sampleCollection_gestAge_wks <- as.numeric(covar$sampleCollection_gestAge_wks)
+covar$mat_BMI <- as.numeric(covar$mat_BMI)
+covar$mat_vitD <- as.numeric(covar$mat_vitD)
+
+# Categorical variables
+covar$preg_preeclampsia <- factor(covar$preg_preeclampsia,
+                                  levels = c('Normal','Preeclampsia'))
+covar$mat_asthma <- factor(ifelse(covar$mat_asthma=='1','Asthma','Healthy'))
+
+# Check that the types and values look right
+str(covar)
+summary(covar)
+```
+
+### Step 3. Derive a categorical variable from a continuous one
+
+```{r derive}
+# BMI groups: <25, 25-30, ≥ 30
+# Only 5 women have the BMI < 18.5, too few for their own group, so they are 
+# combined with the "<25" group
+covar$bmi_group <- cut(covar$mat_BMI,
+                       breaks = c(0,25,30,Inf),
+                       labels = c('<25','25-30','≥30'))
+
+# Check the sample sizes
+table(covar$bmi_group)
+
+```
+
+
+### Step 4. Find my gene and match it to the covariates
+
+The expression columns are in a different order than the rows of the covriate file,
+so I cannot just paste them together. I sort both by sample ID and then check that 
+they line up.
+
+```{r match}
+geneOfInterest <- 'GNLY'
+# Gene name -> probe ID (the row names of expr are the probe IDs, stored as text)
+probeID <- geneNames[which(geneNames$GENE==geneOfInterest),'PROBEID']
+probeID <- as.character(probeID)
+
+# Make sure there is exactly one probe and that it is in the expression data
+length(probeID)
+probeID %in% rownames(expr)
+
+# Transpose so samples are rows and pull out the gene's column
+exprT <- t(expr)
+geneVec <- exprT[,probeID]
+
+# Sort both the covariates and the gene values by sampleID
+covar <- covar[order(covar$geoID),]
+geneVec <- geneVec[order(names(geneVec))]
+
+# Check every sample must line up(all True)
+table(covar$geoID==names(geneVec))
+
+# Only add the gene to the data frame
+covar$Expression <- as.numeric(geneVec)
+plotData <- covar
+
+# Spot check one sample against the raw expression table (should be TRUE)
+expr[probeID,plotData$geoID[1]] == plotData$Expression[1]
+
+# Check the sample sizes per group
+table(plotData$bmi_group,plotData$preg_preeclampsia)
+```
+
+### Final Plot 1. Histogram of gene expression
+
+```{r histogram}
+ggplot(plotData,aes(x=Expression)) +
+  geom_histogram(bins=20,fill='darkgreen',color='white')+
+  labs(title = 
+         expression(paste('Distribution of ', italic('GNLY'), ' Expression')),
+    x=expression(paste(italic('GNLY')),'Expression'),
+    y='Number of Samples')+
+  theme_classic(base_size = 14)+
+  theme(plot.title = element_text(size = 14),
+                    plot.title.position = 'plot')
+ggsave('final_histogram.png',width = 7,height = 5,dpi = 300)
+```
+
+
+### Final Plot 2. Continuous covariate vs. gene expression (scatter plot)
+
+```{r scatter}
+ggplot(plotData,aes(x=mat_vitD,y=Expression))+
+  geom_point(size = 2)+
+  geom_smooth(method = lm, color = 'darkgreen')+
+  ggpubr::stat_cor(method = 'pearson',
+                   label.x = 45,
+                   label.y = 11.2,
+                   p.accuracy = 0.001)+
+  # label.x / label.y move the label to the empty upper-right corner;
+  # p.accuracy = 0.001 stops it from printing a long p-value
+  labs(title = 
+         expression(paste(italic("GNLY"),' Expression vs. Maternal Vitamin D')),
+    x='Maternal Vitamin D (ng/mL)',
+    y=expression(paste(italic('GNLY'),' Expression')))+
+  theme_classic(base_size = 14)+
+  theme(plot.title = element_text(size = 14),
+                    plot.title.position = 'plot')
+  
+ggsave('final_scatter.png',width = 7,height = 5,dpi = 300)
+```
+
+### Final Plot 3. Boxplot by both categorical variables
+
+```{r boxplot}
+# Define the color palette
+colorPalette <- c('grey50','darkgreen')
+
+ggplot(plotData,aes(x=bmi_group,y=Expression,fill=preg_preeclampsia))+
+  geom_boxplot(outlier.shape = NA)+
+  # outlier.shape = NA hides the boxplot's own outlier dots, because every
+  # sample is drawn as a point below 
+  geom_point(aes(group=preg_preeclampsia),
+             position = position_jitterdodge(jitter.width = 0.15),
+             size = 1.5)+
+  # Individual samples on top of the boxes. It spreads points inside each box
+  # so they do not overlap.
+  scale_fill_manual(values = colorPalette)+
+  labs(title = expression(paste(italic('GNLY'),
+                     ' Expression by BMI Group and Pregnancy Condition')),
+      x=expression('BMI Group(kg/m'^2*')'),
+      y=expression(paste(italic('GNLY'),' Expression')),
+      fill='Pregnancy Condition')+
+  theme_classic(base_size = 14)+
+  theme(legend.position = 'top')+
+  theme(plot.title = element_text(size = 14),
+                    plot.title.position = 'plot')
+ggsave('final_boxplot.png',width = 7,height = 5,dpi = 300)
+```
+### Heatmap of the 10 most variable genes
+
+```{r heatmap}
+# Put the expression columns in the same order as the (sorted) covirate rows
+expr <- expr[,covar$geoID]
+
+# Calculate variance of each gene
+variance <- apply(expr,MARGIN = 1 ,FUN=var)
+# Order rows of expr so that highest variance in expression is on top
+exprOrdered <- expr[order(variance,decreasing = T),]
+
+# Keep the top 10 genes
+heatData <- exprOrdered[1:10,]
+
+# Change the row names from probe IDs to gene names
+row.names(geneNames) <- geneNames$PROBEID
+row.names(heatData) <- geneNames[row.names(heatData),'GENE']
+
+# Put every gene on the same scale (mean 0, sd 1 across samples) so that genes
+# with high expression do not hide the others
+heatData <- t(apply(heatData,MARGIN = 1,FUN = function(x) (x - mean(x))/sd(x)))
+
+# Gene names in italics for the row labels
+italicNames <- parse(text = paste0('italic("',row.names(heatData),'")'))
+
+# Define covariates for the 2 traking bars
+annotationData <- data.frame(row.names = colnames(heatData),
+                             'Condition'=covar$preg_preeclampsia,
+                             'BMI'=covar$bmi_group)
+annotationColors <- list(Condition=c('Normal'='grey50',
+                                     'Preeclampsia'='darkgreen'),
+                         BMI=c('<25'='lightskyblue1',
+                               '25-30'='deepskyblue3',
+                               '≥30'='navy'))
+# Generate the heatmap
+heatmap <- pheatmap(heatData,
+         clustering_distance_cols = 'euclidean',
+         clustering_distance_rows = 'euclidean',
+         annotation_col = annotationData,
+         annotation_colors = annotationColors,
+         main = 'The 10 Most Variable Genes',
+         labels_row = italicNames,
+         # show_colnames=F because 157 sample names would not fit
+         show_colnames = F)
+# Save the heatmap (the gtable is the picture inside the pheatmap object)
+# Save the heatmap as a png (the png device can draw ≥, the pdf device could not)
+ggsave('final_heatmap.png',plot = heatmap$gtable,width = 8,height = 4.5,
+       dpi = 300, bg='white')
+```
+### Additional plot: volcano plot of vitamin D and every gene
+
+A volcano plot shows how big the difference is (x axis) and how strong the evidence is (y axis) for many genes at once. Here very gene is compared between women with vitamin D $\geq$ 30 ng/mL (the usual cut point for sufficient vitamin D) and women with vitamin D < 30 ng/mL.
+
+```{r valcano}
+# Define the vitamin D groups
+covar$vitD_group <- factor(ifelse(covar$mat_vitD >= 30,'≥30','<30'),
+                           levels = c('<30','≥30'))
+
+# Define somewhere to store results
+volcanoData <- data.frame(row.names = row.names(expr),
+                          'Diff' = rep(NA,nrow(expr)),
+                          'P.Val' = rep(NA,nrow(expr)))
+
+# Loop through all genes (same idea as the t test function from class)
+for (i in row.names(expr)) {
+  # Subset data
+  covar$Gene <- exprT[covar$geoID,i]
+  # Run t test
+  tempTest <- t.test(Gene ~ vitD_group,covar)
+  # Extract values: mean of the >=30 group minus mean of the <30 group
+  volcanoData[i,'Diff'] <- tempTest$estimate[2] - tempTest$estimate[1]
+  volcanoData[i,'P.Val'] <- tempTest$p.value
+}
+
+# Add gene names (row names of geneNames were set to the probe IDs above)
+volcanoData$Gene <- geneNames[row.names(volcanoData),'GENE']
+
+# Color the genes by direction if p < 0.05
+volcanoData$Direction <- ifelse(volcanoData$P.Val < 0.05,
+                                ifelse(volcanoData$Diff > 0,
+                                       'Higher if ≥30','Lower if ≥30'),
+                                'p ≥ 0.05')
+
+# Bonferroni p value cutoff for 500 tests
+bonferroni <- 0.05/nrow(volcanoData)
+
+# The genes I want to name on the plot, and how far above (+) or below (-) its
+# point each name goes (GNLY and IL26 have other points right next to them)
+labelData <- volcanoData[volcanoData$Gene %in% c('GNLY','LYN','IL26'),]
+labelOffset <- c('GNLY' = -0.6,'IL26' = 1.8,'LYN' = 0.5)
+
+# Muted colors: teal = higher in the <30 group, tan = higher in the ≥30 group
+volcanoColors <- c('Lower if ≥30' = '#4A9B8E',
+                   'Higher if ≥30' = '#C49A52',
+                   'p ≥ 0.05' = 'grey75')
+
+# Number of genes in each group (used in the legend)
+volcanoCounts <- table(volcanoData$Direction)
+
+# Left and right edges of the plot, and the height of the arrow at the top
+xMin <- min(volcanoData$Diff) - 0.05
+xMax <- max(volcanoData$Diff) + 0.05
+arrowY <- max(-log10(volcanoData$P.Val)) + 0.8
+
+ggplot(volcanoData,aes(x = Diff,y = -log10(P.Val),color = Direction,
+                       alpha = -log10(P.Val))) +
+  # Add one point per gene
+  geom_point(size = 2) +
+  # Define colors
+    # Legend: Up / NotSig / Down with the number of genes in each group
+  scale_color_manual(values = volcanoColors,
+                     breaks = c('Higher if ≥30','p ≥ 0.05','Lower if ≥30'),
+                     labels = c(paste0('Up (n = ',volcanoCounts['Higher if ≥30'],')'),
+                                paste0('NotSig (n = ',volcanoCounts['p ≥ 0.05'],')'),
+                                paste0('Down (n = ',volcanoCounts['Lower if ≥30'],')'))) +
+  # The more significant the gene, the darker its point (no legend for this)
+  scale_alpha_continuous(range = c(0.3,1),guide = 'none') +
+  # Change scale of the axes to give us more space for the labels
+  xlim(xMin,xMax) +
+  ylim(0,arrowY + 0.6) +
+  # Add a dashed line at p = 0.05 and a dotted line at the Bonferroni cutoff
+  annotate(geom = 'segment',x = -Inf,xend = Inf,
+           y = -log10(0.05),yend = -log10(0.05),linetype = 'dashed') +
+  annotate(geom = 'segment',x = -Inf,xend = Inf,
+           y = -log10(bonferroni),yend = -log10(bonferroni),linetype = 'dotted') +
+  # Label the two lines
+  annotate(geom = 'text',x = xMax - 0.01,y = -log10(0.05) - 0.3,
+           label = 'p = 0.05',hjust = 1,size = 3.5) +
+  annotate(geom = 'text',x = xMin + 0.01,y = -log10(bonferroni) + 0.9,
+           label = 'Bonferroni cutoff (p = 0.0001)',hjust = 0,size = 3.5) +
+  # Add an arrow at the top that says which side is higher in which group
+  annotate(geom = 'segment',x = -0.17,xend = 0.17,y = arrowY,yend = arrowY,
+           arrow = arrow(ends = 'both',type = 'closed',length = unit(0.2,'cm'))) +
+  annotate(geom = 'text',x = -0.19,y = arrowY,label = 'Higher in\n<30',
+           hjust = 1,size = 3.8) +
+  annotate(geom = 'text',x = 0.19,y = arrowY,label = 'Higher in\n≥30',
+           hjust = 0,size = 3.8) +
+  # Circle the 3 genes of interest
+  geom_point(data = labelData,shape = 21,size = 3.5,color = 'black',fill = NA,
+             alpha = 1) +
+  # Add the names of the 3 genes
+  # (parse = T turns the text italic(GNLY) into an italic GNLY)
+  annotate(geom = 'text',x = labelData$Diff,
+           y = -log10(labelData$P.Val) + as.numeric(labelOffset[labelData$Gene]),
+           label = paste0('italic("',labelData$Gene,'")'),parse = T,
+           color = 'black',alpha = 1) +
+  # Change labels
+  labs(title = 'Gene Expression by Vitamin D Group (≥30 vs. <30 ng/mL)',
+       x = 'Difference in expression (≥30 minus <30)',
+       y = expression(-log[10](italic(p)~'value')),color = NULL) +
+  # Set theme
+  theme_classic(base_size = 14) +
+  theme(legend.position = 'right') +
+  theme(plot.title = element_text(size = 14),
+                    plot.title.position = 'plot')
+ggsave('final_volcano.png',width = 7,height = 5,dpi = 300)
+```
+
+
+
+
+  
